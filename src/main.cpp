@@ -1,55 +1,77 @@
+#include <atomic>
+#include <csignal>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
+#include <vector>
 
-// CUSTOM LIBRARIES
-#include "Music.h"
+#include <ftxui/component/component.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/dom/elements.hpp>
+
 #include "DArrray.h"
+#include "Music.h"
+
 using namespace std;
+using namespace ftxui;
 
-void PlayBack(int currentSong, DArray *list, size_t sizeList)
+// ── Shared state between UI thread and playback thread ────────────────────────
+atomic<int> gCurrentSong(0);     // which song is playing right now
+atomic<bool> gIsPlaying(false);  // paused or playing
+atomic<bool>
+  gUserSelected(false);  // true when user jumped to a song via Enter
+                         // prevents PlaybackThread from auto-advancing
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+bool directoryExists(const string &path)
 {
-    string musicdir = "Music";
-    string name = list->access((size_t)currentSong);
-
-    string state = "play";
-    thread InputThread(InputFunction);
-    while(state != "stop")
-        {
-            if(state == "next")
-                {
-                    if((size_t)currentSong + 1 >= sizeList) { currentSong = 0; }
-                    else
-                        {
-                            currentSong += 1;
-                        }
-                    cout << currentSong << endl;
-                    name = list->access(currentSong);
-                    state = "play";
-                }
-            state = PlayMusic(name);
-        }
-    stop = true;
-    InputThread.join();
+    struct stat info;
+    if(stat(path.c_str(), &info) != 0) return false;
+    return (info.st_mode & S_IFDIR);
 }
 
-int chooseMusic(size_t sizeList)
+// Strip directory prefix and .wav extension for clean display
+string displayName(const string &path)
 {
-    int currentSong = 1;
-    while(true)
+    size_t slash = path.rfind('/');
+    string name = (slash != string::npos) ? path.substr(slash + 1) : path;
+    if(name.size() > 4 && name.substr(name.size() - 4) == ".wav")
+        name = name.substr(0, name.size() - 4);
+    return name;
+}
+
+// ── Playback thread ───────────────────────────────────────────────────────────
+// Runs SDL2 audio in background; FTXUI owns the main thread
+void PlaybackThread(DArray *list, size_t sizeList, ScreenInteractive *screen)
+{
+    while(!stop.load())
         {
-            cout << "enter your choice" << endl;
-            cin >> currentSong;
-            if(currentSong < 1 || currentSong > (int)sizeList)
+            int idx = gCurrentSong.load();
+            if((size_t)idx >= sizeList) idx = 0;
+
+            gIsPlaying.store(true);
+            screen->PostEvent(Event::Custom);  // refresh UI to show new song
+
+            string result = PlayMusic(list->access((size_t)idx));
+
+            if(stop.load()) break;
+
+            // Song finished or skipped — decide what plays next
+            if(!gUserSelected.exchange(false))
                 {
-                    cout << "PLEASE ENTER A VALID INPUT" << endl;
+                    // Natural end or [N] key: advance to next in playlist
+                    int next = (idx + 1) % (int)sizeList;
+                    gCurrentSong.store(next);
                 }
-            else
-                {
-                    break;
-                }
+            // If gUserSelected was true, gCurrentSong is already set by the UI
+            // thread
+
+            currentState.store(Command::NONE);
+            screen->PostEvent(Event::Custom);
         }
-    cin.ignore();
-    return currentSong - 1;
+
+    gIsPlaying.store(false);
+    screen->PostEvent(Event::Custom);
 }
 
 int main()
@@ -57,14 +79,156 @@ int main()
     DArray list;
     string musicdir = "Music";
 
+    if(!directoryExists(musicdir)) { return -1; }
+
+    signal(SIGINT, handle_sigint);
     listMusic(&list, musicdir);
+
     size_t sizeList = list.size();
+    if(sizeList == 0) return -1;
 
-    int currentSong = chooseMusic(sizeList);
-    PlayBack(currentSong, &list, sizeList);
-    stop = true;
+    // Pre-compute display names once
+    vector<string> names;
+    for(size_t i = 0; i < sizeList; i++)
+        names.push_back(displayName(list.access(i)));
 
-    cout << "EXIT" << endl;
+    auto screen = ScreenInteractive::Fullscreen();
+
+    int navIdx = 0;  // keyboard browse cursor (independent of playing song)
+
+    // ── Renderer ─────────────────────────────────────────────────────────────
+    auto ui = Renderer([&] {
+        int cur = gCurrentSong.load();
+        bool playing = gIsPlaying.load();
+
+        string curName = (cur < (int)sizeList) ? names[cur] : "—";
+        string statusText = playing ? " ▶  Playing" : " ⏸  Paused";
+        Color statusCol = playing ? Color::Green : Color::Yellow;
+
+        // ── Playlist rows ─────────────────────────────────────────────────────
+        Elements rows;
+        for(int i = 0; i < (int)sizeList; i++)
+            {
+                bool isCur = (i == cur);
+                bool isNav = (i == navIdx);
+
+                string prefix = isCur ? " ♪ " : "   ";
+                string num = to_string(i + 1) + ".  ";
+
+                auto row = hbox({text(prefix), text(num), text(names[i])});
+
+                if(isCur && isNav)
+                    row = row | color(Color::Green) | bold | inverted;
+                else if(isCur)
+                    row = row | color(Color::Green) | bold;
+                else if(isNav)
+                    row = row | inverted;
+
+                rows.push_back(row);
+            }
+
+        // ── Layout ────────────────────────────────────────────────────────────
+        return vbox({
+          // Header
+          text(" ♫  C++ Music Player ") | bold | center | color(Color::Cyan),
+          separator(),
+
+          // Now playing
+          vbox({
+            hbox({text("  Now Playing : ") | bold,
+                  text(curName) | color(Color::Green) | bold}),
+            hbox({text("  Status      : ") | bold,
+                  text(statusText) | color(statusCol)}),
+          }),
+          separator(),
+
+          // Playlist (scrollable)
+          text("  Playlist") | bold,
+          vbox(rows) | frame | flex,
+          separator(),
+
+          // Controls legend
+          hbox({
+            text(" [Space] Pause/Play") | color(Color::Yellow),
+            text("  [↑↓] Browse") | color(Color::Yellow),
+            text("  [Enter] Jump") | color(Color::Yellow),
+            text("  [N] Skip") | color(Color::Yellow),
+            text("  [Q] Quit ") | color(Color::Yellow),
+          }) |
+            center,
+        });
+    });
+
+    // ── Keyboard events ───────────────────────────────────────────────────────
+    auto component = CatchEvent(ui, [&](Event e) -> bool {
+        // Browse playlist up / down
+        if(e == Event::ArrowUp)
+            {
+                navIdx = max(0, navIdx - 1);
+                return true;
+            }
+        if(e == Event::ArrowDown)
+            {
+                navIdx = min((int)sizeList - 1, navIdx + 1);
+                return true;
+            }
+
+        // Enter — jump to browsed song
+        if(e == Event::Return)
+            {
+                gCurrentSong.store(navIdx);
+                gUserSelected.store(true);  // tell thread not to auto-advance
+                currentState.store(Command::NEXT);
+                gIsPlaying.store(true);
+                return true;
+            }
+
+        // Space — pause / resume
+        if(e == Event::Character(' '))
+            {
+                if(gIsPlaying.load())
+                    {
+                        currentState.store(Command::PAUSE);
+                        gIsPlaying.store(false);
+                    }
+                else
+                    {
+                        currentState.store(Command::PLAY);
+                        gIsPlaying.store(true);
+                    }
+                return true;
+            }
+
+        // N — skip to next song
+        if(e == Event::Character('n') || e == Event::Character('N'))
+            {
+                // gUserSelected stays false → thread auto-advances to idx+1
+                currentState.store(Command::NEXT);
+                gIsPlaying.store(true);
+                return true;
+            }
+
+        // Q — quit
+        if(e == Event::Character('q') || e == Event::Character('Q'))
+            {
+                stop.store(true);
+                currentState.store(Command::STOP);
+                screen.ExitLoopClosure()();
+                return true;
+            }
+
+        return false;
+    });
+
+    // Start playback in background before entering the UI loop
+    thread playThread(PlaybackThread, &list, sizeList, &screen);
+
+    screen.Loop(component);
+
+    // Cleanup
+    stop.store(true);
+    currentState.store(Command::STOP);
+    if(playThread.joinable()) playThread.join();
 
     return 0;
 }

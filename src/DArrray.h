@@ -17,11 +17,10 @@ class DArray
     DArray();
 
     void push(std::string element);
-    std::string access(size_t index) const;
+    std::string access(size_t index);
     std::size_t size();
 
-
-    //Cannot Create Copy Of This
+    // Cannot Create Copy Of This
     DArray(const DArray &) = delete;
     DArray &operator=(const DArray &) = delete;
 };
