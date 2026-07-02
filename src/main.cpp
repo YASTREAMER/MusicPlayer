@@ -5,6 +5,8 @@
 #include <thread>
 #include <vector>
 
+#include <vlc/libvlc.h>
+
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -41,8 +43,7 @@ string displayName(const string &path)
 }
 
 // ── Playback thread ───────────────────────────────────────────────────────────
-// Runs SDL2 audio in background; FTXUI owns the main thread
-void PlaybackThread(DArray *list, size_t sizeList, ScreenInteractive *screen)
+void PlaybackThread(libvlc_instance_t *inst, DArray *list, size_t sizeList, ScreenInteractive *screen)
 {
     while(!stop.load())
         {
@@ -52,7 +53,7 @@ void PlaybackThread(DArray *list, size_t sizeList, ScreenInteractive *screen)
             gIsPlaying.store(true);
             screen->PostEvent(Event::Custom);  // refresh UI to show new song
 
-            string result = PlayMusic(list->access((size_t)idx));
+            string result = PlayMusic(inst, list->access((size_t)idx));
 
             if(stop.load()) break;
 
@@ -76,6 +77,8 @@ void PlaybackThread(DArray *list, size_t sizeList, ScreenInteractive *screen)
 
 int main()
 {
+    libvlc_instance_t *inst = libvlc_new(0, NULL);
+    if(inst == NULL) { return -1; }
     DArray list;
     string musicdir = "Music";
 
@@ -221,7 +224,7 @@ int main()
     });
 
     // Start playback in background before entering the UI loop
-    thread playThread(PlaybackThread, &list, sizeList, &screen);
+    thread playThread(PlaybackThread, inst, &list, sizeList, &screen);
 
     screen.Loop(component);
 
@@ -229,6 +232,6 @@ int main()
     stop.store(true);
     currentState.store(Command::STOP);
     if(playThread.joinable()) playThread.join();
-
+    libvlc_release(inst);
     return 0;
 }

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <string>
+#include <vlc/libvlc.h>
 
 #include "DArrray.h"
 
@@ -20,7 +21,7 @@ extern std::atomic<bool> stop;
 extern std::atomic<Command> currentState;
 
 void listMusic(DArray *list, std::string musicdir = "");
-std::string PlayMusic(std::string name);
+std::string PlayMusic(libvlc_instance_t *inst, std::string name);
 void handle_sigint(int);
 
 #endif
