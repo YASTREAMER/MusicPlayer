@@ -1,9 +1,11 @@
 #include <atomic>
 #include <csignal>
 #include <string>
-#include <sys/stat.h>
 #include <thread>
 #include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <vlc/libvlc.h>
 
@@ -37,13 +39,16 @@ string displayName(const string &path)
 {
     size_t slash = path.rfind('/');
     string name = (slash != string::npos) ? path.substr(slash + 1) : path;
-    if(name.size() > 4 && name.substr(name.size() - 4) == ".wav")
+    if((name.size() > 4 && name.substr(name.size() - 4) == ".wav") ||
+       (name.size() > 4 && name.substr(name.size() - 4) == ".mp3") ||
+       (name.size() > 5 && name.substr(name.size() - 5) == ".flac"))
         name = name.substr(0, name.size() - 4);
     return name;
 }
 
 // ── Playback thread ───────────────────────────────────────────────────────────
-void PlaybackThread(libvlc_instance_t *inst, DArray *list, size_t sizeList, ScreenInteractive *screen)
+void PlaybackThread(libvlc_instance_t *inst, DArray *list, size_t sizeList,
+                    ScreenInteractive *screen)
 {
     while(!stop.load())
         {
@@ -57,8 +62,14 @@ void PlaybackThread(libvlc_instance_t *inst, DArray *list, size_t sizeList, Scre
 
             if(stop.load()) break;
 
+            if(result == "prev")
+                {
+                    int prev = (idx - 1 + (int)sizeList) % (int)sizeList;
+                    gCurrentSong.store(prev);
+                }
+
             // Song finished or skipped — decide what plays next
-            if(!gUserSelected.exchange(false))
+            else if(!gUserSelected.exchange(false))
                 {
                     // Natural end or [N] key: advance to next in playlist
                     int next = (idx + 1) % (int)sizeList;
@@ -98,6 +109,15 @@ int main()
     auto screen = ScreenInteractive::Fullscreen();
 
     int navIdx = 0;  // keyboard browse cursor (independent of playing song)
+    auto formatTime = [](int ms) -> string {
+        if(ms < 0) ms = 0;
+        int secs = ms / 1000;
+        int mins = secs / 60;
+        secs = secs % 60;
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d:%02d", mins, secs);
+        return string(buf);
+    };
 
     // ── Renderer ─────────────────────────────────────────────────────────────
     auto ui = Renderer([&] {
@@ -142,6 +162,20 @@ int main()
                   text(curName) | color(Color::Green) | bold}),
             hbox({text("  Status      : ") | bold,
                   text(statusText) | color(statusCol)}),
+            hbox({
+              text("  Volume  : ") | bold,
+              gauge((float)gVolume.load() / 100.0f) | flex | color(Color::Cyan),
+              text(" " + to_string(gVolume.load()) + "%") | bold,
+            }),
+            hbox({
+              text("  " + formatTime(gCurrentTime.load())) | bold,
+              text(" "),
+              gauge(gTotalTime.load() > 0
+                      ? (float)gCurrentTime.load() / (float)gTotalTime.load()
+                      : 0.0f) |
+                flex | color(Color::Cyan),
+              text(" " + formatTime(gTotalTime.load()) + " ") | bold,
+            }),
           }),
           separator(),
 
@@ -153,10 +187,12 @@ int main()
           // Controls legend
           hbox({
             text(" [Space] Pause/Play") | color(Color::Yellow),
-            text("  [↑↓] Browse") | color(Color::Yellow),
+            text("  [K/J] Browse") | color(Color::Yellow),
             text("  [Enter] Jump") | color(Color::Yellow),
             text("  [N] Skip") | color(Color::Yellow),
+            text("  [P] Prev") | color(Color::Yellow),
             text("  [Q] Quit ") | color(Color::Yellow),
+            text("  [U/O] Volume") | color(Color::Yellow),
           }) |
             center,
         });
@@ -165,14 +201,30 @@ int main()
     // ── Keyboard events ───────────────────────────────────────────────────────
     auto component = CatchEvent(ui, [&](Event e) -> bool {
         // Browse playlist up / down
-        if(e == Event::ArrowUp)
+        if(e == Event::Character('k') || e == Event::Character('K'))
             {
                 navIdx = max(0, navIdx - 1);
                 return true;
             }
-        if(e == Event::ArrowDown)
+        if(e == Event::Character('j') || e == Event::Character('J'))
             {
                 navIdx = min((int)sizeList - 1, navIdx + 1);
+                return true;
+            }
+        if(e == Event::Character('u') || e == Event::Character('U'))
+            {
+                int newVol = min(100, gVolume.load() + 5);
+                gVolume.store(newVol);
+                currentState.store(Command::VOLUMEUP);
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+        if(e == Event::Character('o') || e == Event::Character('O'))
+            {
+                int newVol = max(0, gVolume.load() - 5);
+                gVolume.store(newVol);
+                currentState.store(Command::VOLUMEDOWN);
+                screen.PostEvent(Event::Custom);
                 return true;
             }
 
@@ -210,6 +262,12 @@ int main()
                 gIsPlaying.store(true);
                 return true;
             }
+        // P - skip to previous song
+        if(e == Event::Character('p') || e == Event::Character('P'))
+            {
+                currentState.store(Command::PREV);
+                return true;
+            }
 
         // Q — quit
         if(e == Event::Character('q') || e == Event::Character('Q'))
@@ -225,6 +283,13 @@ int main()
 
     // Start playback in background before entering the UI loop
     thread playThread(PlaybackThread, inst, &list, sizeList, &screen);
+    thread timerThread([&] {
+        while(!stop.load())
+            {
+                screen.PostEvent(Event::Custom);
+                usleep(500000);  // refresh every 500ms
+            }
+    });
 
     screen.Loop(component);
 
@@ -232,6 +297,7 @@ int main()
     stop.store(true);
     currentState.store(Command::STOP);
     if(playThread.joinable()) playThread.join();
+    if(timerThread.joinable()) timerThread.join();
     libvlc_release(inst);
     return 0;
 }

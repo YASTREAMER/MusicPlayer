@@ -19,6 +19,9 @@ using namespace std;
 // Definitions of the shared atomics declared in Music.h
 atomic<bool> stop(false);
 atomic<Command> currentState(Command::NONE);
+atomic<int> gVolume(100);
+atomic<int> gCurrentTime(0);
+atomic<int> gTotalTime(0);
 
 void listMusic(DArray *list, string musicdir)
 {
@@ -37,8 +40,12 @@ void listMusic(DArray *list, string musicdir)
                             if(entry->d_name[0] == '.') continue;
 
                             string name(entry->d_name);
-                            if(name.size() > 4 &&
-                               name.substr(name.size() - 4) == ".wav")
+                            if((name.size() > 4 &&
+                                name.substr(name.size() - 4) == ".wav") ||
+                               (name.size() > 4 &&
+                                name.substr(name.size() - 4) == ".mp3") ||
+                               (name.size() > 5 &&
+                                name.substr(name.size() - 5) == ".flac"))
                                 {
                                     list->push(musicdir + "/" + name);
                                 }
@@ -97,6 +104,12 @@ string PlayMusic(libvlc_instance_t *inst, string name)
                     libvlc_media_player_release(player);
                     return "next";
                 }
+            else if(cmd == Command::PREV)
+                {
+                    libvlc_media_player_stop(player);
+                    libvlc_media_player_release(player);
+                    return "prev";
+                }
             else if(cmd == Command::PAUSE)
                 {
                     libvlc_media_player_set_pause(player, 1);
@@ -105,7 +118,29 @@ string PlayMusic(libvlc_instance_t *inst, string name)
                 {
                     libvlc_media_player_set_pause(player, 0);
                 }
+            else if(cmd == Command::VOLUMEUP)
+                {
+                    int volume = libvlc_audio_get_volume(player);
+                    if(volume < 100)
+                        {
+                            libvlc_audio_set_volume(player, volume + 5);
+                        }
+                    gVolume.store(libvlc_audio_get_volume(player));
+                    currentState.store(Command::NONE);
+                }
+            else if(cmd == Command::VOLUMEDOWN)
+                {
+                    int volume = libvlc_audio_get_volume(player);
+                    if(volume > 0)
+                        {
+                            libvlc_audio_set_volume(player, volume - 5);
+                        }
+                    gVolume.store(libvlc_audio_get_volume(player));
+                    currentState.store(Command::NONE);
+                }
 
             usleep(10000);  // 10ms — same as your old SDL_Delay(10)
+            gCurrentTime.store(libvlc_media_player_get_time(player));
+            gTotalTime.store(libvlc_media_player_get_length(player));
         }
 }

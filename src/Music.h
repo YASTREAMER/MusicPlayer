@@ -14,11 +14,17 @@ enum class Command
     PAUSE,
     PLAY,
     STOP,
-    NEXT
+    NEXT,
+    PREV,
+    VOLUMEUP,
+    VOLUMEDOWN
 };
 
 extern std::atomic<bool> stop;
 extern std::atomic<Command> currentState;
+extern std::atomic<int> gVolume;
+extern std::atomic<int> gCurrentTime;
+extern std::atomic<int> gTotalTime;
 
 void listMusic(DArray *list, std::string musicdir = "");
 std::string PlayMusic(libvlc_instance_t *inst, std::string name);

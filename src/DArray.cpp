@@ -24,8 +24,7 @@ void DArray::push(string element)
     currentSize += 1;
 }
 
-// TODO: Create a way for contious update of the list of Music
-string DArray::access(size_t index)
+string DArray::access(size_t index) const
 {
     if(index >= currentSize)
         {
@@ -44,4 +43,4 @@ DArray::DArray()
     listMusic = new string[capacity];
 }
 
-size_t DArray::size() { return currentSize; }
+size_t DArray::size() const { return currentSize; }
